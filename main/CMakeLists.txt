@@ -1,0 +1,22 @@
+idf_component_register(
+    SRCS
+        "main.c"
+        "backlight.c"
+        "gauge_renderer.c"
+        "newhaven_display.c"
+        "newhaven_display_diagnostics.c"
+    INCLUDE_DIRS
+        "."
+    REQUIRES
+        esp_driver_gpio
+        esp_driver_ledc
+        esp_hw_support
+        esp_lcd
+        esp_lcd_st7701
+        esp_mm
+    PRIV_REQUIRES
+        soc
+    EMBED_FILES
+        "../assets/oil_pressure_gauge.rgb565"
+        "../assets/needle.rgba8888"
+)
