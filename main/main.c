@@ -7,6 +7,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "backlight.h"
+#include "can_receiver.h"
 #include "display_config.h"
 #include "gauge_renderer.h"
 #include "newhaven_display.h"
@@ -140,6 +141,11 @@ void app_main(void)
                                         oil_pressure_gauge_size,
                                         needle_rgba8888_start,
                                         needle_size));
+    const esp_err_t can_err = can_receiver_start(NULL, NULL);
+    if (can_err != ESP_OK) {
+        ESP_LOGW(TAG, "CAN unavailable (%s); continuing the existing gauge animation",
+                 esp_err_to_name(can_err));
+    }
     ESP_LOGI(TAG, "Starting double-buffered animated oil-pressure gauge");
 
     const TickType_t frame_period = pdMS_TO_TICKS(1000 / GAUGE_FRAME_RATE_HZ);

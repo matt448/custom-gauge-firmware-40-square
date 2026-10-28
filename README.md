@@ -62,6 +62,167 @@ selecting 16 MiB alone would not enlarge the app partition. An existing
 `sdkconfig` also retains its saved choices unless updated; this change updates
 both the active configuration and regeneration defaults.
 
+## CAN reception
+
+The gauge uses the ESP32-P4's internal TWAI controller through U2, the external
+TI TCAN3404-Q1 transceiver. It is not an SPI CAN interface. The application uses
+only ESP-IDF **6.0.2's new public `esp_twai.h` / `esp_twai_onchip.h` API**;
+it does not use or mix in the legacy `driver/twai.h` API.
+
+### Wiring and bus termination
+
+| Connection | MCU GPIO | Module pad | Transceiver connection |
+| --- | --- | --- | --- |
+| CAN_TX | **GPIO5** | 20 | U2 pin 1, TXD |
+| CAN_RX | **GPIO6** | 21 | U2 pin 4, RXD |
+
+Firmware uses GPIO numbers **5 and 6**, not pad numbers 20 and 21. U2 pin 3
+is 3.3 V and pin 2 is ground; SHDN (pin 5) and STB (pin 8) are grounded.
+There is no GPIO-controlled enable to configure. U2 pin 7 is CANH and pin 6
+is CANL. Connect CANH/CANL with the appropriate twisted-pair bus wiring and a
+common signal-ground reference between the gauge and ECU.
+
+CAN needs **one 120-ohm terminator at each of the two physical bus ends**,
+not one at every gauge. This PCB includes **R5, 120 ohms**: populate/use it
+only when this board is a bus endpoint that needs termination. For multiple
+gauges, intermediate boards must not add R5 termination. Account for any ECU
+or other endpoint terminator already fitted. With the network unpowered,
+two parallel 120-ohm terminations normally measure about 60 ohms across
+CANH/CANL. Do not add a third terminator merely because another gauge is added.
+
+### Configuration and behavior
+
+[`main/can_config.h`](main/can_config.h) centralizes GPIOs, **500000 bit/s
+Classical CAN**, operating mode, diagnostic rate, bounded queue sizes, and the
+future MegaSquirt decoder's realtime base ID. There is no CAN FD data-phase
+configuration or bitrate switching.
+
+Default `CAN_LISTEN_ONLY=0` is **normal CAN mode**. There are no application
+frame transmissions, but the controller **acknowledges valid received frames**.
+That ACK is essential if the ECU and this gauge are the only active nodes.
+The installed driver requires a TX queue of at least one entry in normal
+mode; the module allocates that minimum but never submits a transmit request.
+
+Set `CAN_LISTEN_ONLY=1` for passive diagnostics. Listen-only sends **no ACK**:
+another normal-mode receiver must acknowledge the ECU's transmissions.
+Otherwise the ECU may retry and accumulate transmission errors; an ECU and a
+listen-only gauge alone are not a correctly acknowledged network.
+
+The receiver starts once after gauge-renderer initialization. A separate
+priority-1 task receives/processes CAN without waiting in the rendering loop.
+The synthetic oil-pressure animation is unchanged; no CAN value drives it yet.
+CAN startup failure is logged and published as `CAN_RECEIVER_FAILED`, not
+passed to `ESP_ERROR_CHECK`, so the gauge continues rendering. Missing traffic
+is a valid idle state, not an initialization failure.
+
+The accept-all filter uses IDF's documented-in-source P4 HAL full-open case
+(`id=0`, `mask=0`), including standard **and** extended identifiers and RTR.
+The ISR copies each received frame into owned queue storage before returning.
+Each record contains its identifier, STD/EXT flag, RTR flag, original DLC,
+payload length/bytes, and a 1-MHz reception timestamp in microseconds.
+RTR records have zero payload length even if their DLC requests data.
+Classical DLC values above eight retain their raw DLC but expose at most
+eight data bytes. Unexpected FD/BRS records are counted and not dispatched.
+
+The RX queue holds 128 complete records; state transitions have a separate
+16-entry queue. Both use static internal-DRAM storage. Callbacks perform
+only ISR-safe reception, atomic counter updates, and nonblocking
+`xQueueSendFromISR`; they do not log, allocate, decode, or block.
+Task-context diagnostics default to one summary every **5 seconds**, at most
+**3 raw frame samples** and **4 transition logs per interval**. Change
+`CAN_DIAGNOSTICS_ENABLED` to disable routine summaries/samples; errors and
+recovery requests still surface. Suppressed transition logs and dropped
+state events are counted separately.
+
+Diagnostics report cumulative received frames (including software queue
+drops), frames/second averaged over the actual report interval, software
+queue drops, receive errors, unexpected frame types, cumulative bus errors,
+error flags, TEC/REC, controller state, recovery requests, and age of the last
+received frame. Application counters remain cumulative across recovery even
+though IDF resets its own bus-error history on recovery. ISR counters are
+lock-free 32-bit values accumulated into task-owned 64-bit totals; the status
+snapshot is updated approximately every 100 ms. Time-since-RX uses tick
+differences and is intended for ordinary timeout intervals, not a bus idle
+for an entire tick-counter wrap period.
+
+The installed public driver does **not** expose hardware RX FIFO-overrun
+counts. The logs explicitly label that measurement unavailable: zero software
+queue drops does not prove that the hardware lost no frames.
+
+On bus-off, the CAN task calls the installed driver's `twai_node_recover()`
+once for that episode and waits for state-change/status evidence of recovery.
+Hardware must observe 128 occurrences of 11 recessive bits. It does not
+reinstall the driver, enqueue frames, or restart the display. Attempts for
+different episodes are separated by at least 10 seconds, and a failed request
+is not retried in a tight loop. A bus that never recovers remains visibly
+`recovering`/`bus_off` in the periodic status.
+
+### Expected logs and future decoder interface
+
+With or without an ECU, startup should include:
+
+```text
+can_rx: Classical CAN 500000 bit/s TX=GPIO5 RX=GPIO6 mode=normal (ACK enabled); no application TX
+can_rx: Accept STD/EXT and RTR; RX queue=128; timestamps=1 MHz; hardware RX-overrun count unavailable
+can_rx: Realtime broadcast reference base=1520 (0x5F0); no ECU decoding or gauge updates
+```
+
+With no traffic, summaries show `rx=0 rate=0.0 fps last_rx=never`, normally
+`state=error_active`. An active controller does not establish that an ECU is
+connected or broadcasting. When traffic arrives, counts/rate increase and
+sample lines show `t=... us ID=0x... STD/EXT RTR=... DLC=... data=...`.
+RTR lines explicitly say `<RTR: no payload>`. Bus errors/state transitions
+point to checking bitrate, termination, wiring, ground reference, and ACKs;
+the module does not interpret silence as a particular wiring fault.
+
+[`main/can_receiver.h`](main/can_receiver.h) provides:
+
+- `can_receiver_start(handler, context)`: called once; an optional handler
+  receives owned frame records in the CAN task. The handler must return
+  promptly and copy any record it retains. Main currently passes `NULL`.
+- `can_receiver_get_status(&status)`: a task-safe status snapshot, including
+  initialization errors and frame/drop/error counts, for a future UI.
+
+A separate MegaSquirt decoder can consume the timestamped records without
+changing the TWAI ISR. Do not add DCS reads to expose CAN status: post-panel-init
+DCS reads previously forced command mode and blanked the display.
+
+### MegaSquirt MS3 Pro 1.6.2 / TunerStudio setup
+
+Reception does **not** enable broadcasting on the ECU. Use the actual MS3 Pro
+**1.6.2 ECU definition** in TunerStudio and back up the tune before changing ECU
+settings. For this integration, choose **CAN Realtime Data Broadcasting**, not
+**Simplified Dash Broadcasting**:
+
+- Realtime broadcasting's default base is **1520 decimal (`0x5F0`)**.
+  Group N uses standard 11-bit ID **base + N**, with big-endian multi-byte
+  values and the realtime group's documented layout.
+- Simplified Dash Broadcasting uses a different, fixed dash layout and its own
+  default base identifiers. Do not apply realtime group offsets, scalings, or
+  channel mappings to those frames. No simplified-dash decoder is implemented.
+- `CAN_MS_REALTIME_BASE_ID` is configurable reference metadata for a future
+  decoder; changing it neither configures the ECU nor restricts raw reception.
+
+In TunerStudio's **CAN-bus/Testmodes** menu (wording depends on the loaded ECU
+definition), open **CAN Realtime Data Broadcasting**:
+
+1. Enable realtime broadcasting; set/confirm the base identifier as **1520**,
+   or choose another valid standard-ID base and match the firmware reference.
+   Keep the ECU's CAN-node ID separate from this broadcast base.
+2. Enable the documented realtime data groups you want to inspect and choose
+   a nonzero broadcast rate. Start with a small selection at a modest rate
+   (for example 10 Hz if offered), not every group at its maximum rate.
+3. Use the ECU's **500 kbit/s** CAN bus. If its definition exposes a bitrate
+   option, confirm it matches; changing this gauge's bitrate cannot configure
+   the ECU.
+4. Burn/save the settings to the ECU and follow any ECU-definition prompt
+   requiring a restart. Confirm actual IDs, payloads, and rates in the gauge's
+   sampled CAN logs before selecting/scaling any sensor channel.
+
+Reference: [MegaSquirt CAN broadcast protocol](https://www.msextra.com/doc/pdf/Megasquirt_CAN_Broadcast.pdf)
+and the matching MS3 Pro 1.6.2/TunerStudio ECU definition. The firmware does not
+assume an oil-pressure ID, sensor-channel assignment, scale, or unit.
+
 ## Required hardware wiring
 
 | LCD FFC pin | Function | Connection |

@@ -2,6 +2,7 @@ idf_component_register(
     SRCS
         "main.c"
         "backlight.c"
+        "can_receiver.c"
         "gauge_renderer.c"
         "newhaven_display.c"
         "newhaven_display_diagnostics.c"
@@ -16,6 +17,7 @@ idf_component_register(
         esp_mm
     PRIV_REQUIRES
         soc
+        esp_driver_twai
     EMBED_FILES
         "../assets/oil_pressure_gauge.rgb565"
         "../assets/needle.rgba8888"
