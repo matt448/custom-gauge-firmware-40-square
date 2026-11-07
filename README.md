@@ -110,7 +110,14 @@ listen-only gauge alone are not a correctly acknowledged network.
 
 The receiver starts once after gauge-renderer initialization. A separate
 priority-1 task receives/processes CAN without waiting in the rendering loop.
-The synthetic oil-pressure animation is unchanged; no CAN value drives it yet.
+The full three-second startup sweep always completes, even if CAN traffic
+is already present, followed by a two-second hold at zero. Reception continues
+during the sweep and hold; afterward the
+smoothed needle follows the latest fresh CAN oil pressure. If no message
+arrives, the sweep finishes at zero. After two seconds without a valid oil-pressure
+message, the target returns to zero and a warning is logged once; reception
+of a fresh value logs recovery and resumes tracking. Zero on timeout is a
+fallback, not a confirmed pressure measurement.
 CAN startup failure is logged and published as `CAN_RECEIVER_FAILED`, not
 passed to `ESP_ERROR_CHECK`, so the gauge continues rendering. Missing traffic
 is a valid idle state, not an initialization failure.
@@ -157,14 +164,14 @@ different episodes are separated by at least 10 seconds, and a failed request
 is not retried in a tight loop. A bus that never recovers remains visibly
 `recovering`/`bus_off` in the periodic status.
 
-### Expected logs and future decoder interface
+### Expected logs and decoder interface
 
 With or without an ECU, startup should include:
 
 ```text
 can_rx: Classical CAN 500000 bit/s TX=GPIO5 RX=GPIO6 mode=normal (ACK enabled); no application TX
 can_rx: Accept STD/EXT and RTR; RX queue=128; timestamps=1 MHz; hardware RX-overrun count unavailable
-can_rx: Realtime broadcast reference base=1520 (0x5F0); no ECU decoding or gauge updates
+can_rx: Realtime broadcast reference base=1520 (0x5F0); decoding delegated to frame handler
 ```
 
 With no traffic, summaries show `rx=0 rate=0.0 fps last_rx=never`, normally
@@ -179,32 +186,54 @@ the module does not interpret silence as a particular wiring fault.
 
 - `can_receiver_start(handler, context)`: called once; an optional handler
   receives owned frame records in the CAN task. The handler must return
-  promptly and copy any record it retains. Main currently passes `NULL`.
+  promptly and copy any record it retains. Main supplies a decoder handler
+  and shares only the latest decoded value with the rendering task under a
+  short critical section; the CAN task never calls the renderer.
 - `can_receiver_get_status(&status)`: a task-safe status snapshot, including
   initialization errors and frame/drop/error counts, for a future UI.
 
-A separate MegaSquirt decoder can consume the timestamped records without
-changing the TWAI ISR. Do not add DCS reads to expose CAN status: post-panel-init
+[`main/ms3_decoder.c`](main/ms3_decoder.c) decodes **standard ID `0x5EB`**,
+exactly eight payload bytes, with generic sensor 1 in bytes 2-3 as a signed
+big-endian integer divided by ten. The simulator maps that value to **PSI**;
+this mapping is not a universal ECU oil-pressure assignment. Extended, RTR,
+wrong-ID, and wrong-length frames do not update the reading or its timeout.
+Values outside the face's 0-150 PSI range are clamped by the renderer.
+Freshness uses local task processing time, not the controller timestamp's
+potentially different clock origin. Configure the ID and two-second timeout
+in [`main/can_config.h`](main/can_config.h).
+
+Do not add DCS reads to expose CAN status: post-panel-init
 DCS reads previously forced command mode and blanked the display.
 
 ### MegaSquirt MS3 Pro 1.6.2 / TunerStudio setup
 
 Reception does **not** enable broadcasting on the ECU. Use the actual MS3 Pro
 **1.6.2 ECU definition** in TunerStudio and back up the tune before changing ECU
-settings. For this integration, choose **CAN Realtime Data Broadcasting**, not
-**Simplified Dash Broadcasting**:
+settings. For the needle decoder, use **Simplified Dash Broadcasting** and
+confirm generic sensor 1 represents oil pressure in PSI, encoded times ten,
+with the sensor message on standard ID `0x5EB`. The simulator already uses
+this mapping and sweeps 60-70 PSI. Confirm the ECU's sensor assignment and
+units before treating it as a live oil-pressure source.
+
+The two broadcast formats are different:
 
 - Realtime broadcasting's default base is **1520 decimal (`0x5F0`)**.
   Group N uses standard 11-bit ID **base + N**, with big-endian multi-byte
   values and the realtime group's documented layout.
 - Simplified Dash Broadcasting uses a different, fixed dash layout and its own
   default base identifiers. Do not apply realtime group offsets, scalings, or
-  channel mappings to those frames. No simplified-dash decoder is implemented.
+  channel mappings to those frames. Only the generic-sensor-1 mapping described
+  above is currently decoded.
 - `CAN_MS_REALTIME_BASE_ID` is configurable reference metadata for a future
   decoder; changing it neither configures the ECU nor restricts raw reception.
 
 In TunerStudio's **CAN-bus/Testmodes** menu (wording depends on the loaded ECU
-definition), open **CAN Realtime Data Broadcasting**:
+definition), enable **Simplified Dash Broadcasting**, select a nonzero rate
+(for example 20 Hz if offered), and verify the actual sensor payload against
+the mapping above. Exact menu labels depend on the loaded definition.
+
+For raw diagnostics of **CAN Realtime Data Broadcasting** instead (these
+messages do not drive the needle), open that separate dialog:
 
 1. Enable realtime broadcasting; set/confirm the base identifier as **1520**,
    or choose another valid standard-ID base and match the firmware reference.
@@ -220,8 +249,8 @@ definition), open **CAN Realtime Data Broadcasting**:
    sampled CAN logs before selecting/scaling any sensor channel.
 
 Reference: [MegaSquirt CAN broadcast protocol](https://www.msextra.com/doc/pdf/Megasquirt_CAN_Broadcast.pdf)
-and the matching MS3 Pro 1.6.2/TunerStudio ECU definition. The firmware does not
-assume an oil-pressure ID, sensor-channel assignment, scale, or unit.
+and the matching MS3 Pro 1.6.2/TunerStudio ECU definition. Realtime oil-pressure
+groups and other sensor mappings are not decoded.
 
 ## Required hardware wiring
 
@@ -514,11 +543,14 @@ completed framebuffer to DSI scanout.
 
 ## Gauge animation
 
-The independent `gauge_renderer` module currently generates a synthetic test
-value that sweeps from 0 to 150 PSI over approximately 1.5 seconds and
-returns to 0 PSI over the next 1.5 seconds, then holds at 0 PSI. Its
-displayed value is set directly during the startup sweep so it reaches both
-endpoints exactly.
+The application starts with a synthetic sweep from 0 to 150 PSI over
+approximately 1.5 seconds and returns to 0 PSI over the next 1.5 seconds.
+CAN oil pressure takes control only after the full sweep and a two-second
+hold at zero complete, using
+the latest fresh reading received during or after startup. The renderer smooths subsequent
+needle movement with its existing coefficient. Missing/stale data behavior
+is described in the CAN section above. Only the startup sweep sets the
+displayed value directly to reach both endpoints exactly.
 
 The needle sprite's pivot is `(5, 200)`: centered horizontally and 200 pixels
 from its top edge. It therefore has a 200-pixel forward length and a 49-pixel
