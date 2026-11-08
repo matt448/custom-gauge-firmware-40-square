@@ -382,8 +382,8 @@ esp_err_t can_receiver_start(can_frame_handler_t handler, void *context)
         goto failed;
     }
     stage = "create CAN receive task";
-    if (xTaskCreate(receive_task, "can_rx", CAN_TASK_STACK_BYTES, NULL,
-                    CAN_TASK_PRIORITY, &task) != pdPASS) {
+    if (xTaskCreatePinnedToCore(receive_task, "can_rx", CAN_TASK_STACK_BYTES, NULL,
+                                CAN_TASK_PRIORITY, &task, CAN_TASK_CORE) != pdPASS) {
         err = ESP_ERR_NO_MEM;
         goto failed;
     }
