@@ -5,6 +5,7 @@
 #include <string.h>
 
 #include "esp_heap_caps.h"
+#include "esp_lcd_mipi_dsi.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -26,11 +27,9 @@
 
 #if NEWHAVEN_DISPLAY_PIXEL_FORMAT == NEWHAVEN_DISPLAY_PIXEL_FORMAT_RGB888
 #define GAUGE_RENDERER_DISPLAY_COLOR_FORMAT LV_COLOR_FORMAT_RGB888
-#define GAUGE_RENDERER_DISPLAY_BYTES_PER_PIXEL 3U
 #define GAUGE_RENDERER_DISPLAY_FORMAT_NAME "RGB888"
 #elif NEWHAVEN_DISPLAY_PIXEL_FORMAT == NEWHAVEN_DISPLAY_PIXEL_FORMAT_RGB565
 #define GAUGE_RENDERER_DISPLAY_COLOR_FORMAT LV_COLOR_FORMAT_RGB565
-#define GAUGE_RENDERER_DISPLAY_BYTES_PER_PIXEL 2U
 #define GAUGE_RENDERER_DISPLAY_FORMAT_NAME "RGB565"
 #else
 #error "NEWHAVEN_DISPLAY_PIXEL_FORMAT must be RGB888 or RGB565."
@@ -100,6 +99,7 @@ static int64_t s_render_total_us;
 static int64_t s_performance_window_start_us;
 static uint32_t s_render_count;
 static uint32_t s_refresh_count;
+static size_t s_framebuffer_allocated_bytes;
 #endif
 
 static void free_needle_pixels(void)
@@ -118,6 +118,49 @@ static float clamp_value(float value)
     }
     return value;
 }
+
+static lv_display_rotation_t configured_display_rotation(void)
+{
+    switch (NEWHAVEN_DISPLAY_ROTATION) {
+    case NEWHAVEN_DISPLAY_ROTATION_90:
+        return LV_DISPLAY_ROTATION_90;
+    case NEWHAVEN_DISPLAY_ROTATION_180:
+        return LV_DISPLAY_ROTATION_180;
+    case NEWHAVEN_DISPLAY_ROTATION_270:
+        return LV_DISPLAY_ROTATION_270;
+    case NEWHAVEN_DISPLAY_ROTATION_0:
+    default:
+        return LV_DISPLAY_ROTATION_0;
+    }
+}
+
+#if GAUGE_PERFORMANCE_DIAGNOSTICS
+static esp_err_t log_framebuffer_allocation(esp_lcd_panel_handle_t dpi_panel)
+{
+    void *framebuffer;
+    void *backbuffer;
+    const esp_err_t err = esp_lcd_dpi_panel_get_frame_buffer(dpi_panel, 2,
+                                                             &framebuffer,
+                                                             &backbuffer);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Unable to inspect DSI framebuffer allocations: %s",
+                 esp_err_to_name(err));
+        return err;
+    }
+
+    const size_t framebuffer_size = heap_caps_get_allocated_size(framebuffer);
+    const size_t backbuffer_size = heap_caps_get_allocated_size(backbuffer);
+    s_framebuffer_allocated_bytes = framebuffer_size + backbuffer_size;
+    ESP_LOGI(TAG, "DSI framebuffer allocation: fb0=%p %u bytes, fb1=%p %u bytes, "
+             "total=%u bytes; internal_free=%u PSRAM_free=%u",
+             framebuffer, (unsigned int)framebuffer_size,
+             backbuffer, (unsigned int)backbuffer_size,
+             (unsigned int)s_framebuffer_allocated_bytes,
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
+             (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT));
+    return ESP_OK;
+}
+#endif
 
 static void create_scene(void)
 {
@@ -363,17 +406,13 @@ static void performance_event_callback(lv_event_t *event)
                                            (uint64_t)elapsed_us);
     const uint32_t render_avg_us = s_render_count == 0 ? 0 :
                                    (uint32_t)(s_render_total_us / s_render_count);
-    const size_t framebuffer_bytes =
-        (size_t)NEWHAVEN_DISPLAY_H_RES * NEWHAVEN_DISPLAY_V_RES *
-        GAUGE_RENDERER_DISPLAY_BYTES_PER_PIXEL *
-        NEWHAVEN_DISPLAY_FB_COUNT;
     ESP_LOGI(TAG, "LVGL perf: refresh=%" PRIu32 " Hz render_avg=%" PRIu32
-             " us internal_free=%u PSRAM_free=%u framebuffers=%u bytes; "
+             " us internal_free=%u PSRAM_free=%u framebuffers_allocated=%u bytes; "
              "per-core CPU utilization unavailable with current SMP runtime-stat config",
              refresh_hz, render_avg_us,
              (unsigned int)heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT),
              (unsigned int)heap_caps_get_free_size(MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT),
-             (unsigned int)framebuffer_bytes);
+             (unsigned int)s_framebuffer_allocated_bytes);
     s_performance_window_start_us = now_us;
     s_render_total_us = 0;
     s_render_count = 0;
@@ -397,6 +436,12 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
         ESP_LOGE(TAG, "Renderer is already initialized");
         return ESP_ERR_INVALID_STATE;
     }
+#if GAUGE_PERFORMANCE_DIAGNOSTICS
+    const esp_err_t framebuffer_log_err = log_framebuffer_allocation(dpi_panel);
+    if (framebuffer_log_err != ESP_OK) {
+        return framebuffer_log_err;
+    }
+#endif
 
     s_needle_pixels = heap_caps_malloc(GAUGE_RENDERER_NEEDLE_SIZE,
                                        MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT);
@@ -462,17 +507,19 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
     const lvgl_port_display_cfg_t display_config = {
         .panel_handle = dpi_panel,
         .buffer_size = NEWHAVEN_DISPLAY_H_RES * NEWHAVEN_DISPLAY_V_RES,
-        .double_buffer = true,
+        .double_buffer = NEWHAVEN_DISPLAY_FB_COUNT == 2,
         .hres = NEWHAVEN_DISPLAY_H_RES,
         .vres = NEWHAVEN_DISPLAY_V_RES,
         .color_format = GAUGE_RENDERER_DISPLAY_COLOR_FORMAT,
         .flags = {
+            .buff_spiram = NEWHAVEN_DISPLAY_ROTATION != NEWHAVEN_DISPLAY_ROTATION_0,
+            .sw_rotate = NEWHAVEN_DISPLAY_ROTATION != NEWHAVEN_DISPLAY_ROTATION_0,
             .direct_mode = true,
         },
     };
     const lvgl_port_display_dsi_cfg_t dsi_config = {
         .flags = {
-            .avoid_tearing = true,
+            .avoid_tearing = NEWHAVEN_DISPLAY_FB_COUNT == 2,
         },
     };
     s_lvgl_display = lvgl_port_add_disp_dsi(&display_config, &dsi_config);
@@ -506,6 +553,7 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
         s_widget_lock = NULL;
         return ESP_ERR_TIMEOUT;
     }
+    lv_display_set_rotation(s_lvgl_display, configured_display_rotation());
 #if GAUGE_PERFORMANCE_DIAGNOSTICS
     lv_display_add_event_cb(s_lvgl_display, performance_event_callback,
                             LV_EVENT_RENDER_START, NULL);

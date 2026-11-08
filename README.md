@@ -117,7 +117,13 @@ smoothed needle follows the latest fresh CAN oil pressure. If no message
 arrives, the sweep finishes at zero. After two seconds without a valid oil-pressure
 message, the target returns to zero and a warning is logged once; reception
 of a fresh value logs recovery and resumes tracking. Zero on timeout is a
-fallback, not a confirmed pressure measurement.
+fallback, not a confirmed pressure measurement. The production readout shows
+the latest fresh PSI value rounded to a whole number (or `--` before the first
+sample or when stale),
+with `PSI` in a separate fixed-position label. A separate indicator blinks red
+immediately while waiting for the first sample and after two seconds without
+a subsequent valid sample; it glows amber below 10 PSI and solid red below
+5 PSI. Stale takes precedence over pressure thresholds.
 CAN startup failure is logged and published as `CAN_RECEIVER_FAILED`, not
 passed to `ESP_ERROR_CHECK`, so the gauge continues rendering. Missing traffic
 is a valid idle state, not an initialization failure.
@@ -302,15 +308,23 @@ Compile-time settings include:
   and keep above 1000 ms for refresh sampling
 - `NEWHAVEN_BACKLIGHT_PWM_GPIO` (GPIO8)
 - `NEWHAVEN_BACKLIGHT_DEFAULT_PERCENT` (0 through 100)
-- `NEWHAVEN_DISPLAY_FB_COUNT`: one or two PSRAM-backed framebuffers
+- `NEWHAVEN_DISPLAY_FB_COUNT`: exactly two PSRAM-backed framebuffers; other
+  values fail at compile time because LVGL direct-mode tear avoidance requires both
 - `NEWHAVEN_DISPLAY_PIXEL_FORMAT`: RGB888 (default) or RGB565
 
 ESP-IDF v6.0.2 supports RGB888 and RGB565 for the ESP32-P4 MIPI DSI DPI
 driver. RGB888 is the default. The driver allocates display framebuffers in
 DMA-capable PSRAM; `sdkconfig.defaults` enables the board's PSRAM support.
 
-Rotation is applied while drawing the diagnostic framebuffer. Do not send an
-unverified ST7701SN orientation/MADCTL command solely to rotate the panel.
+`NEWHAVEN_DISPLAY_ROTATION` applies to the live LVGL display using the port's
+software/PPA rotation path, so the background, needle, readout, and warning
+indicator share one orientation. The default remains 0 degrees; nonzero
+rotation can require an additional PSRAM scratch buffer. The legacy diagnostic
+framebuffer helpers use the same setting. Do not send an unverified ST7701SN
+orientation/MADCTL command solely to rotate the panel.
+
+The pre-v3 ESP32-P4 DSI PHY build is guarded at compile time and at startup;
+the application accepts ESP32-P4 revisions v1.x and v2.x and rejects v3+.
 
 The DSI PHY is powered before DSI bus creation through ESP32-P4 internal LDO
 channel 3 at 2.5 V. This follows the installed ESP-IDF MIPI DSI LCD example
@@ -415,12 +429,12 @@ per snapshot and never write clear/mask/force/configuration registers. The
 existing IDF bridge ISR still clears its own interrupts, so a sampled zero
 does not rule out earlier underruns. No interrupt history is claimed.
 
-The application registers `on_refresh_done` before panel initialization.
-Hardware color tests run before LVGL starts, so this counter is available for
-those startup tests. The LVGL DSI port later registers its frame-buffer
-completion callback; IDF's registration API replaces the entire application
-callback set. The startup counter should therefore not be treated as a
-continuous runtime frame-rate measurement.
+The application registers a startup-only `on_refresh_done` counter before
+panel initialization. Hardware color tests run before LVGL starts, so this
+counter is available for those tests. When LVGL adds its DSI display, the port
+registers its own frame-completion callback; IDF replaces the entire callback
+set. Runtime refresh timing therefore uses LVGL's refresh-ready event after
+the port's DSI completion wait, not the startup counter.
 
 On pre-v3 P4, IDF sets `MIPI_DSI_BRG_LL_EVENT_VSYNC` to zero and invokes
 `on_refresh_done` from the DMA full-transfer completion callback. The new
@@ -538,9 +552,10 @@ python tools\png_to_rgb565.py assets\needle.png --format rgba8888 -o assets\need
 
 Rebuild and flash after replacing either source asset. The little-endian
 RGB565 face is read directly from flash by LVGL, which redraws only invalidated
-regions. The display controller's two PSRAM-backed RGB888 framebuffers are
-used directly by LVGL in tear-avoiding direct mode; no full-screen image copy
-is allocated.
+regions. At the default 0-degree rotation, the display controller's two
+PSRAM-backed RGB888 framebuffers are used directly by LVGL in tear-avoiding
+direct mode; no full-screen image copy is allocated. Nonzero rotation uses the
+LVGL port's software/PPA rotation path and may allocate a PSRAM scratch buffer.
 
 ## Gauge animation
 
@@ -573,6 +588,12 @@ and gauge-data processing run on core 0; they publish value snapshots and do
 not call LVGL. The LVGL task owns image, label, and warning objects. Public
 text and warning APIs update small fixed-size models that the LVGL timer
 applies, so routine updates do not allocate memory.
+
+The production oil-pressure readout and warning indicator are always enabled;
+their values and state are evaluated in the application task and sent through
+the thread-safe model APIs. LVGL objects are created/updated only by the LVGL
+task. The optional demo widgets remain behind `GAUGE_DEMO_WIDGETS_ENABLED`,
+default `0`.
 
 The little-endian RGB565 gauge image is rendered directly from flash by LVGL's
 RGB888 software renderer. The needle uses its existing 11 x 250 RGBA8888
@@ -634,13 +655,15 @@ ESP_ERROR_CHECK(gauge_warning_indicator_set_visible(oil_warning, true));
 ESP_ERROR_CHECK(gauge_warning_indicator_set_state(oil_warning, GAUGE_WARNING_CLEAR));
 ```
 
-The in-firmware demonstration readout and warning are behind
-`GAUGE_DEMO_WIDGETS_ENABLED`, which defaults to `0`; enabling it creates
-initially hidden objects and does not change the default gauge layout.
+The pinned `esp_lvgl_port` 2.9.0 DSI completion compatibility patch is applied
+to a generated copy under the build directory, never to `managed_components`.
+CMake verifies the exact port version, expected source callback, and installed
+ESP-LCD `on_refresh_done` API; it fails clearly if an assumption changes.
 
 Set `GAUGE_PERFORMANCE_DIAGNOSTICS` to `1` in `display_config.h` for
-five-second summaries of LVGL render time, refresh-cycle rate, free internal
-heap, free PSRAM, and the two-framebuffer memory footprint. Per-core CPU
+startup logs of each framebuffer's actual heap allocation and periodic
+five-second summaries of LVGL render time, completed refresh rate, free
+internal heap, and free PSRAM. Per-core CPU
 utilization is not currently reported: this build does not enable FreeRTOS
 SMP runtime statistics, and the counter settings would need separate
 validation before treating them as a reliable P4 measurement.

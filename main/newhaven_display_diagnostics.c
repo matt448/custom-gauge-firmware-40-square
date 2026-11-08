@@ -17,10 +17,10 @@
 #endif
 
 static const char *TAG = "dsi_host_diag";
-static DRAM_ATTR uint32_t refresh_count;
-static bool refresh_callback_registered;
+static DRAM_ATTR uint32_t startup_refresh_count;
+static bool startup_refresh_callback_registered;
 
-_Static_assert(__atomic_always_lock_free(sizeof(refresh_count), 0),
+_Static_assert(__atomic_always_lock_free(sizeof(startup_refresh_count), 0),
                "Refresh counter must use lock-free ISR-safe atomics");
 
 static bool IRAM_ATTR on_refresh_done(esp_lcd_panel_handle_t panel,
@@ -30,7 +30,7 @@ static bool IRAM_ATTR on_refresh_done(esp_lcd_panel_handle_t panel,
     (void)panel;
     (void)event_data;
     (void)user_ctx;
-    __atomic_fetch_add(&refresh_count, 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&startup_refresh_count, 1, __ATOMIC_RELAXED);
     return false;
 }
 
@@ -40,25 +40,26 @@ void newhaven_display_diagnostics_register(esp_lcd_panel_handle_t panel)
         .on_refresh_done = on_refresh_done,
     };
     const esp_err_t err = esp_lcd_dpi_panel_register_event_callbacks(panel, &callbacks, NULL);
-    refresh_callback_registered = err == ESP_OK;
+    startup_refresh_callback_registered = err == ESP_OK;
     if (err != ESP_OK) {
-        ESP_LOGW(TAG, "Refresh callback registration failed: %s; diagnostics will continue",
+        ESP_LOGW(TAG, "Startup refresh callback registration failed: %s",
                  esp_err_to_name(err));
     } else {
-        ESP_LOGI(TAG, "Refresh counter registered; pre-v3 IDF uses DMA completion, not bridge VSYNC");
-        ESP_LOGI(TAG, "Refresh progress does not prove LCD reception or a displayed frame");
+        ESP_LOGI(TAG, "Startup-only refresh counter registered; LVGL replaces this callback when its DSI display is added");
+        ESP_LOGI(TAG, "Pre-v3 IDF counts DMA completion, not bridge VSYNC or confirmed LCD reception");
     }
 }
 
-uint32_t newhaven_display_refresh_count(void)
+uint32_t newhaven_display_startup_refresh_count(void)
 {
-    return __atomic_load_n(&refresh_count, __ATOMIC_RELAXED);
+    return __atomic_load_n(&startup_refresh_count, __ATOMIC_RELAXED);
 }
 
 void newhaven_display_log_host_snapshot(const char *stage)
 {
-    ESP_LOGI(TAG, "Host snapshot: %s; refresh_callback_registered=%u, total=%u",
-             stage, refresh_callback_registered, (unsigned int)newhaven_display_refresh_count());
+    ESP_LOGI(TAG, "Host snapshot: %s; startup_refresh_callback_registered=%u, total=%u",
+             stage, startup_refresh_callback_registered,
+             (unsigned int)newhaven_display_startup_refresh_count());
 #if CONFIG_IDF_TARGET_ESP32P4 && CONFIG_ESP32P4_SELECTS_REV_LESS_V3
     esp_chip_info_t chip;
     esp_chip_info(&chip);

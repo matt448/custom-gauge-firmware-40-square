@@ -1,6 +1,7 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <stdint.h>
+#include <math.h>
 
 #include "esp_check.h"
 #include "esp_log.h"
@@ -29,6 +30,16 @@ extern const uint8_t needle_rgba8888_end[] asm("_binary_needle_rgba8888_end");
 #define GAUGE_ZERO_HOLD_MS 2000
 #define GAUGE_LOG_INTERVAL_MS 1000
 #define GAUGE_DEMO_WIDGETS_ENABLED 0
+#define GAUGE_OIL_PRESSURE_LOW_PSI 10.0f
+#define GAUGE_OIL_PRESSURE_CRITICAL_PSI 5.0f
+#define GAUGE_OIL_PRESSURE_WARNING_BLINK_MS 500
+
+typedef enum {
+    OIL_PRESSURE_WARNING_CLEAR,
+    OIL_PRESSURE_WARNING_STALE,
+    OIL_PRESSURE_WARNING_LOW,
+    OIL_PRESSURE_WARNING_CRITICAL,
+} oil_pressure_warning_state_t;
 
 typedef struct {
     float pressure_psi;
@@ -38,6 +49,122 @@ typedef struct {
 
 static portMUX_TYPE oil_pressure_lock = portMUX_INITIALIZER_UNLOCKED;
 static oil_pressure_sample_t oil_pressure;
+static gauge_text_t *oil_pressure_readout;
+static gauge_text_t *oil_pressure_units;
+static gauge_warning_indicator_t *oil_pressure_warning;
+
+static void init_oil_pressure_widgets(void)
+{
+    const gauge_text_config_t readout_config = {
+        .x = -68,
+        .y = 16,
+        .width = 40,
+        .align = LV_ALIGN_TOP_RIGHT,
+        .text_align = LV_TEXT_ALIGN_LEFT,
+        .color = lv_color_hex(0xFFFFFF),
+        .font = LV_FONT_DEFAULT,
+        .units = NULL,
+        .visible = true,
+    };
+    ESP_ERROR_CHECK(gauge_text_create(&readout_config, &oil_pressure_readout));
+    ESP_ERROR_CHECK(gauge_text_set_text(oil_pressure_readout, "--"));
+
+    const gauge_text_config_t units_config = {
+        .x = -16,
+        .y = 16,
+        .width = 40,
+        .align = LV_ALIGN_TOP_RIGHT,
+        .text_align = LV_TEXT_ALIGN_LEFT,
+        .color = lv_color_hex(0xFFFFFF),
+        .font = LV_FONT_DEFAULT,
+        .visible = true,
+    };
+    ESP_ERROR_CHECK(gauge_text_create(&units_config, &oil_pressure_units));
+    ESP_ERROR_CHECK(gauge_text_set_text(oil_pressure_units, "PSI"));
+
+    const gauge_warning_config_t warning_config = {
+        .x = 16,
+        .y = 16,
+        .align = LV_ALIGN_TOP_LEFT,
+        .size = 24,
+        .blink_interval_ms = GAUGE_OIL_PRESSURE_WARNING_BLINK_MS,
+        .warning_color = lv_color_hex(0xFFC107),
+        .critical_color = lv_color_hex(0xF44336),
+        .visible = false,
+        .blink = false,
+    };
+    ESP_ERROR_CHECK(gauge_warning_indicator_create(&warning_config,
+                                                   &oil_pressure_warning));
+}
+
+static void update_oil_pressure_widgets(const oil_pressure_sample_t *sample, bool fresh)
+{
+    static int64_t last_readout_sample_us;
+    static bool readout_is_stale = true;
+    static oil_pressure_warning_state_t previous_warning;
+    static bool warning_initialized;
+
+    if (fresh && sample->updated_us != last_readout_sample_us) {
+        ESP_ERROR_CHECK(gauge_text_set_integer(oil_pressure_readout,
+                                               (int32_t)roundf(sample->pressure_psi)));
+        last_readout_sample_us = sample->updated_us;
+        readout_is_stale = false;
+    } else if (!fresh && !readout_is_stale) {
+        ESP_ERROR_CHECK(gauge_text_set_text(oil_pressure_readout, "--"));
+        readout_is_stale = true;
+    }
+
+    oil_pressure_warning_state_t warning;
+    if (!fresh) {
+        warning = OIL_PRESSURE_WARNING_STALE;
+    } else if (sample->pressure_psi < GAUGE_OIL_PRESSURE_CRITICAL_PSI) {
+        warning = OIL_PRESSURE_WARNING_CRITICAL;
+    } else if (sample->pressure_psi < GAUGE_OIL_PRESSURE_LOW_PSI) {
+        warning = OIL_PRESSURE_WARNING_LOW;
+    } else {
+        warning = OIL_PRESSURE_WARNING_CLEAR;
+    }
+    if (warning_initialized && warning == previous_warning) {
+        return;
+    }
+
+    switch (warning) {
+    case OIL_PRESSURE_WARNING_STALE:
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_colors(
+            oil_pressure_warning, lv_color_hex(0xF44336), lv_color_hex(0xF44336)));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_blink(
+            oil_pressure_warning, true, GAUGE_OIL_PRESSURE_WARNING_BLINK_MS));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_state(
+            oil_pressure_warning, GAUGE_WARNING_ACTIVE));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_visible(oil_pressure_warning, true));
+        break;
+    case OIL_PRESSURE_WARNING_LOW:
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_colors(
+            oil_pressure_warning, lv_color_hex(0xFFC107), lv_color_hex(0xF44336)));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_blink(oil_pressure_warning, false, 0));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_state(
+            oil_pressure_warning, GAUGE_WARNING_ACTIVE));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_visible(oil_pressure_warning, true));
+        break;
+    case OIL_PRESSURE_WARNING_CRITICAL:
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_colors(
+            oil_pressure_warning, lv_color_hex(0xFFC107), lv_color_hex(0xF44336)));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_blink(oil_pressure_warning, false, 0));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_state(
+            oil_pressure_warning, GAUGE_WARNING_CRITICAL));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_visible(oil_pressure_warning, true));
+        break;
+    case OIL_PRESSURE_WARNING_CLEAR:
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_blink(oil_pressure_warning, false, 0));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_state(
+            oil_pressure_warning, GAUGE_WARNING_CLEAR));
+        ESP_ERROR_CHECK(gauge_warning_indicator_set_visible(oil_pressure_warning, false));
+        break;
+    }
+
+    previous_warning = warning;
+    warning_initialized = true;
+}
 
 #if GAUGE_DEMO_WIDGETS_ENABLED
 static gauge_text_t *demo_pressure_readout;
@@ -105,7 +232,7 @@ static void handle_can_frame(const can_rx_frame_t *frame, void *context)
     ((NEWHAVEN_DISPLAY_HARDWARE_PATTERN_MS > 1000) || (NEWHAVEN_DISPLAY_STARTUP_COLOR_TEST_MS > 0))
 static void log_refresh_progress(const char *stage, uint32_t before, TickType_t start)
 {
-    const uint32_t after = newhaven_display_refresh_count();
+    const uint32_t after = newhaven_display_startup_refresh_count();
     const unsigned int elapsed_ms =
         (unsigned int)((xTaskGetTickCount() - start) * portTICK_PERIOD_MS);
     ESP_LOGI(TAG, "Refresh callbacks during %s: %u -> %u, delta=%u over %u ms "
@@ -145,7 +272,7 @@ static void run_startup_color_tests(newhaven_display_t *display)
 
         const TickType_t color_start = xTaskGetTickCount();
 #if NEWHAVEN_DISPLAY_DIAGNOSTICS
-        const uint32_t refresh_before = newhaven_display_refresh_count();
+        const uint32_t refresh_before = newhaven_display_startup_refresh_count();
 #endif
         TickType_t sample_time = color_start;
         vTaskDelayUntil(&sample_time, pdMS_TO_TICKS(200));
@@ -181,7 +308,7 @@ void app_main(void)
     ESP_ERROR_CHECK(esp_lcd_dpi_panel_set_pattern(display.dpi_panel, MIPI_DSI_PATTERN_BAR_VERTICAL));
 #if NEWHAVEN_DISPLAY_DIAGNOSTICS && NEWHAVEN_DISPLAY_HARDWARE_PATTERN_MS > 1000
     const TickType_t pattern_start = xTaskGetTickCount();
-    const uint32_t pattern_refresh_before = newhaven_display_refresh_count();
+    const uint32_t pattern_refresh_before = newhaven_display_startup_refresh_count();
     TickType_t pattern_sample_time = pattern_start;
     vTaskDelayUntil(&pattern_sample_time, pdMS_TO_TICKS(1000));
     log_refresh_progress("host hardware color bars", pattern_refresh_before, pattern_start);
@@ -207,6 +334,7 @@ void app_main(void)
                                         oil_pressure_gauge_size,
                                         needle_rgba8888_start,
                                         needle_size));
+    init_oil_pressure_widgets();
 #if GAUGE_DEMO_WIDGETS_ENABLED
     init_demo_widgets();
 #endif
@@ -217,6 +345,11 @@ void app_main(void)
     }
     ESP_LOGI(TAG, "Oil pressure: STD ID=0x%03X bytes 2-3, signed big-endian PSI x10; timeout=%u ms",
              CAN_MS_DASH_SENSOR_ID, CAN_OIL_PRESSURE_TIMEOUT_MS);
+    ESP_LOGI(TAG, "Oil warnings: blink while awaiting first sample or after %u ms stale; "
+             "low below %.1f PSI, critical below %.1f PSI",
+             CAN_OIL_PRESSURE_TIMEOUT_MS,
+             (double)GAUGE_OIL_PRESSURE_LOW_PSI,
+             (double)GAUGE_OIL_PRESSURE_CRITICAL_PSI);
     ESP_LOGI(TAG, "Starting LVGL double-buffered CAN oil-pressure gauge");
 
     const TickType_t frame_period = pdMS_TO_TICKS(1000 / GAUGE_PROCESS_RATE_HZ);
@@ -239,6 +372,7 @@ void app_main(void)
         const bool fresh = sample.valid &&
             esp_timer_get_time() - sample.updated_us <
                 (int64_t)CAN_OIL_PRESSURE_TIMEOUT_MS * 1000;
+        update_oil_pressure_widgets(&sample, fresh);
 
         if (elapsed_time_ms < GAUGE_CYCLE_DURATION_MS) {
             const float cycle_fraction = (float)(elapsed_time_ms <= GAUGE_SWEEP_DURATION_MS ?

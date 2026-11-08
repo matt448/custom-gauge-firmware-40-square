@@ -4,6 +4,8 @@
 
 #include "esp_log.h"
 #include "esp_rom_sys.h"
+#include "esp_chip_info.h"
+#include "sdkconfig.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/gpio.h"
@@ -36,8 +38,16 @@ static const char *TAG = "newhaven_display";
 #error "NEWHAVEN_DISPLAY_ROTATION must be 0, 90, 180, or 270."
 #endif
 
-#if (NEWHAVEN_DISPLAY_FB_COUNT < 1) || (NEWHAVEN_DISPLAY_FB_COUNT > 2)
-#error "NEWHAVEN_DISPLAY_FB_COUNT must be 1 or 2."
+#if NEWHAVEN_DISPLAY_FB_COUNT != 2
+#error "The LVGL direct-mode DSI display requires exactly two framebuffers for tear avoidance."
+#endif
+
+#if !CONFIG_IDF_TARGET_ESP32P4
+#error "This display configuration requires ESP32-P4."
+#endif
+
+#if !CONFIG_ESP32P4_SELECTS_REV_LESS_V3
+#error "This DSI PHY configuration requires the ESP32-P4 pre-v3 SoC family."
 #endif
 
 #if NEWHAVEN_DISPLAY_PIXEL_FORMAT == NEWHAVEN_DISPLAY_PIXEL_FORMAT_RGB888
@@ -284,6 +294,18 @@ esp_err_t newhaven_display_init(newhaven_display_t *display)
         ESP_LOGE(TAG, "display handle is null");
         return ESP_ERR_INVALID_ARG;
     }
+
+    esp_chip_info_t chip_info;
+    esp_chip_info(&chip_info);
+    if (chip_info.model != CHIP_ESP32P4 ||
+        chip_info.revision < 100 ||
+        chip_info.revision >= 300) {
+        ESP_LOGE(TAG, "Unsupported chip/revision: model=%d revision=%u; "
+                 "this build requires ESP32-P4 revision v1.x or v2.x",
+                 chip_info.model, (unsigned int)chip_info.revision);
+        return ESP_ERR_NOT_SUPPORTED;
+    }
+
     memset(display, 0, sizeof(*display));
 #if NEWHAVEN_DISPLAY_DIAGNOSTICS
     ESP_LOGI(TAG, "DSI configuration: %d lanes, %d Mbps/lane, %d MHz pixel clock, %d bpp",
@@ -380,15 +402,10 @@ esp_err_t newhaven_display_init(newhaven_display_t *display)
     };
     RETURN_ON_ERROR(esp_lcd_new_panel_st7701(display->dbi_io, &panel_config, &display->dpi_panel),
                     "create MIPI DSI ST7701SN panel");
-#if NEWHAVEN_DISPLAY_FB_COUNT == 2
     RETURN_ON_ERROR(esp_lcd_dpi_panel_get_frame_buffer(display->dpi_panel, 2,
                                                         &display->framebuffer,
                                                         &display->backbuffer),
                     "get framebuffers");
-#else
-    RETURN_ON_ERROR(esp_lcd_dpi_panel_get_frame_buffer(display->dpi_panel, 1, &display->framebuffer),
-                    "get framebuffer");
-#endif
 
 #if NEWHAVEN_DISPLAY_DIAGNOSTICS
     newhaven_display_diagnostics_register(display->dpi_panel);
