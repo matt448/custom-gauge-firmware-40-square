@@ -33,6 +33,8 @@ extern const uint8_t needle_rgba8888_end[] asm("_binary_needle_rgba8888_end");
 #define GAUGE_OIL_PRESSURE_LOW_PSI 10.0f
 #define GAUGE_OIL_PRESSURE_CRITICAL_PSI 5.0f
 #define GAUGE_OIL_PRESSURE_WARNING_BLINK_MS 500
+#define GAUGE_OIL_PRESSURE_READOUT_LEFT_X 400
+#define GAUGE_OIL_PRESSURE_READOUT_GAP 4
 
 typedef enum {
     OIL_PRESSURE_WARNING_CLEAR,
@@ -55,14 +57,24 @@ static gauge_warning_indicator_t *oil_pressure_warning;
 
 static void init_oil_pressure_widgets(void)
 {
+    int32_t max_value_width;
+    int32_t stale_value_width;
+    ESP_ERROR_CHECK(gauge_text_measure_width(&lv_font_montserrat_16, "150",
+                                             &max_value_width));
+    ESP_ERROR_CHECK(gauge_text_measure_width(&lv_font_montserrat_16, "--",
+                                             &stale_value_width));
+    if (stale_value_width > max_value_width) {
+        max_value_width = stale_value_width;
+    }
+
     const gauge_text_config_t readout_config = {
-        .x = -68,
-        .y = 16,
-        .width = 40,
-        .align = LV_ALIGN_TOP_RIGHT,
+        .x = GAUGE_OIL_PRESSURE_READOUT_LEFT_X,
+        .y = 24,
+        .width = max_value_width,
+        .align = LV_ALIGN_TOP_LEFT,
         .text_align = LV_TEXT_ALIGN_LEFT,
         .color = lv_color_hex(0xFFFFFF),
-        .font = LV_FONT_DEFAULT,
+        .font = &lv_font_montserrat_16,
         .units = NULL,
         .visible = true,
     };
@@ -70,23 +82,23 @@ static void init_oil_pressure_widgets(void)
     ESP_ERROR_CHECK(gauge_text_set_text(oil_pressure_readout, "--"));
 
     const gauge_text_config_t units_config = {
-        .x = -16,
-        .y = 16,
-        .width = 40,
-        .align = LV_ALIGN_TOP_RIGHT,
+        .x = GAUGE_OIL_PRESSURE_READOUT_LEFT_X + max_value_width +
+             GAUGE_OIL_PRESSURE_READOUT_GAP,
+        .y = 24,
+        .align = LV_ALIGN_TOP_LEFT,
         .text_align = LV_TEXT_ALIGN_LEFT,
         .color = lv_color_hex(0xFFFFFF),
-        .font = LV_FONT_DEFAULT,
+        .font = &lv_font_montserrat_16,
         .visible = true,
     };
     ESP_ERROR_CHECK(gauge_text_create(&units_config, &oil_pressure_units));
     ESP_ERROR_CHECK(gauge_text_set_text(oil_pressure_units, "PSI"));
 
     const gauge_warning_config_t warning_config = {
-        .x = 16,
-        .y = 16,
+        .x = 24,
+        .y = 24,
         .align = LV_ALIGN_TOP_LEFT,
-        .size = 24,
+        .size = 30,
         .blink_interval_ms = GAUGE_OIL_PRESSURE_WARNING_BLINK_MS,
         .warning_color = lv_color_hex(0xFFC107),
         .critical_color = lv_color_hex(0xF44336),

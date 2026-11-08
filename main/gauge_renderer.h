@@ -76,6 +76,9 @@ float gauge_value_to_angle(float value);
 esp_err_t gauge_renderer_get_state(gauge_state_t *state);
 
 esp_err_t gauge_text_create(const gauge_text_config_t *config, gauge_text_t **text);
+esp_err_t gauge_text_measure_width(const lv_font_t *font,
+                                   const char *value,
+                                   int32_t *width);
 esp_err_t gauge_text_set_text(gauge_text_t *text, const char *value);
 esp_err_t gauge_text_set_integer(gauge_text_t *text, int32_t value);
 esp_err_t gauge_text_set_float(gauge_text_t *text, float value, uint8_t decimals);

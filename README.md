@@ -594,6 +594,9 @@ their values and state are evaluated in the application task and sent through
 the thread-safe model APIs. LVGL objects are created/updated only by the LVGL
 task. The optional demo widgets remain behind `GAUGE_DEMO_WIDGETS_ENABLED`,
 default `0`.
+The oil-pressure number and `PSI` are separate Montserrat 16 labels: the number
+is left aligned in a field measured once from the font's rendered width for
+`150` (or `--` if wider), and the fixed unit label follows with a 4 px gap.
 
 The little-endian RGB565 gauge image is rendered directly from flash by LVGL's
 RGB888 software renderer. The needle uses its existing 11 x 250 RGBA8888

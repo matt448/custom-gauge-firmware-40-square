@@ -91,7 +91,10 @@ def main():
             sweep = (1.0 + math.sin(elapsed * 0.5)) / 2.0
 
             rpm = round(800 + 5200 * sweep)
-            oil_pressure_psi = 60.0 + 10.0 * sweep
+
+            oil_pressure_starting_psi = 50.0
+            oil_pressure_offset_psi = 5.0
+            oil_pressure_psi = oil_pressure_starting_psi + oil_pressure_offset_psi * sweep
 
             # ID 0x5E8: MS3 simplified dash broadcast.
             #

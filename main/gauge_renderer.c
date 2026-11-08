@@ -705,6 +705,35 @@ esp_err_t gauge_text_create(const gauge_text_config_t *config, gauge_text_t **te
     return ESP_OK;
 }
 
+esp_err_t gauge_text_measure_width(const lv_font_t *font,
+                                   const char *value,
+                                   int32_t *width)
+{
+    if (value == NULL || width == NULL) {
+        ESP_LOGE(TAG, "Text or width output is null");
+        return ESP_ERR_INVALID_ARG;
+    }
+    if (!s_initialized) {
+        ESP_LOGE(TAG, "Renderer is not initialized");
+        return ESP_ERR_INVALID_STATE;
+    }
+    if (!lvgl_port_lock(portMAX_DELAY)) {
+        ESP_LOGE(TAG, "Unable to acquire the LVGL lock to measure text");
+        return ESP_ERR_TIMEOUT;
+    }
+
+    lv_point_t size = {0};
+    lv_text_get_size(&size, value, font == NULL ? LV_FONT_DEFAULT : font,
+                     0, 0, LV_COORD_MAX, LV_TEXT_FLAG_NONE);
+    lvgl_port_unlock();
+    if (size.x <= 0) {
+        ESP_LOGE(TAG, "Unable to measure text width");
+        return ESP_ERR_INVALID_SIZE;
+    }
+    *width = size.x;
+    return ESP_OK;
+}
+
 esp_err_t gauge_text_set_text(gauge_text_t *text, const char *value)
 {
     return set_text_value(text, value);
