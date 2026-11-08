@@ -16,6 +16,9 @@
 #define CAN_RECOVERY_COOLDOWN_MS          10000
 #define CAN_TASK_STACK_BYTES              4096
 #define CAN_TASK_PRIORITY                 1
+#define CAN_TASK_CORE                     0
+#define CAN_MS_DASH_SENSOR_ID             0x5EB
+#define CAN_OIL_PRESSURE_TIMEOUT_MS       2000
 
-/* Reference for a future decoder; raw reception is not filtered to this base. */
+/* Realtime broadcast base reference; the receiver accepts all IDs. */
 #define CAN_MS_REALTIME_BASE_ID           1520

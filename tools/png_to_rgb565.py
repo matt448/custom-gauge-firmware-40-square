@@ -70,10 +70,9 @@ def main() -> None:
         blue = blue * alpha // 255
 
         pixel = rgb888_to_rgb565(red, green, blue)
-
-        # Most ESP32 LCD configurations expect RGB565 in big-endian byte order.
-        output.append((pixel >> 8) & 0xFF)
+        # LVGL reads RGB565 words in native (little-endian on ESP32-P4) byte order.
         output.append(pixel & 0xFF)
+        output.append((pixel >> 8) & 0xFF)
 
     destination.write_bytes(output)
 

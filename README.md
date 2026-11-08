@@ -416,10 +416,11 @@ existing IDF bridge ISR still clears its own interrupts, so a sampled zero
 does not rule out earlier underruns. No interrupt history is claimed.
 
 The application registers `on_refresh_done` before panel initialization.
-There were no existing application/DPI callbacks to replace; IDF's internal
-DMA callbacks remain untouched. Keep future application event callbacks in
-the same registration because IDF's registration API replaces the entire set.
-Registration failure is logged and nonfatal.
+Hardware color tests run before LVGL starts, so this counter is available for
+those startup tests. The LVGL DSI port later registers its frame-buffer
+completion callback; IDF's registration API replaces the entire application
+callback set. The startup counter should therefore not be treated as a
+continuous runtime frame-rate measurement.
 
 On pre-v3 P4, IDF sets `MIPI_DSI_BRG_LL_EVENT_VSYNC` to zero and invokes
 `on_refresh_done` from the DMA full-transfer completion callback. The new
@@ -523,10 +524,10 @@ I (....) newhaven_display: Sending Newhaven NHD-4.0-480480AF-MSXP ST7701SN initi
 I (....) backlight: Configured TPS92511DDA DIM PWM on GPIO8 at 20000 Hz
 ```
 
-The driver then starts MIPI DSI video output and animates the supplied needle
-sprite over the embedded oil-pressure face at
+The driver then starts MIPI DSI video output and initializes LVGL to display
+the supplied needle sprite over the embedded oil-pressure face at
 [`assets/oil_pressure_gauge.rgb565`](assets/oil_pressure_gauge.rgb565). The
-face is a centered 480 x 480, big-endian RGB565 image (460,800 bytes); its
+face is a centered 480 x 480, little-endian RGB565 image (460,800 bytes); its
 source PNG may be smaller than the display. The needle is an RGBA8888 sprite.
 Generate both embedded assets from their source PNGs with:
 
@@ -535,11 +536,11 @@ python tools\png_to_rgb565.py assets\oil_pressure_gauge.png --canvas-size 480 -o
 python tools\png_to_rgb565.py assets\needle.png --format rgba8888 -o assets\needle.rgba8888
 ```
 
-Rebuild and flash after replacing either source asset. The application expands
-the face into both RGB888 framebuffers at startup. Each 30 FPS frame restores
-the previous needle sprite's rotated bounds from the RGB565 face, alpha-blends
-the newly rotated sprite into the inactive framebuffer, then presents that
-completed framebuffer to DSI scanout.
+Rebuild and flash after replacing either source asset. The little-endian
+RGB565 face is read directly from flash by LVGL, which redraws only invalidated
+regions. The display controller's two PSRAM-backed RGB888 framebuffers are
+used directly by LVGL in tear-avoiding direct mode; no full-screen image copy
+is allocated.
 
 ## Gauge animation
 
@@ -548,7 +549,8 @@ approximately 1.5 seconds and returns to 0 PSI over the next 1.5 seconds.
 CAN oil pressure takes control only after the full sweep and a two-second
 hold at zero complete, using
 the latest fresh reading received during or after startup. The renderer smooths subsequent
-needle movement with its existing coefficient. Missing/stale data behavior
+needle movement with the existing 0.18-per-30-FPS smoothing coefficient,
+time-adjusted for LVGL's 60-FPS update timer. Missing/stale data behavior
 is described in the CAN section above. Only the startup sweep sets the
 displayed value directly to reach both endpoints exactly.
 
@@ -556,13 +558,95 @@ The needle sprite's pivot is `(5, 200)`: centered horizontally and 200 pixels
 from its top edge. It therefore has a 200-pixel forward length and a 49-pixel
 counterweight. Values map linearly from 0 PSI at 225 degrees (lower-left) to
 150 PSI at -45 degrees (lower-right), following the face's counterclockwise
-scale. The renderer uses Cartesian angles, so it negates the display-space Y
-sine term; these constants can be calibrated later without changing the panel
-setup.
+scale. LVGL's clockwise image rotation is mapped from the existing Cartesian
+gauge angles, retaining the same sweep direction and pivot. The image
+transformation anti-aliasing flag is enabled; the needle is converted once at
+startup to premultiplied ARGB8888 in PSRAM to keep filtered transparent edges
+free of dark halos.
 
-The default framebuffer count is two. The DSI driver scans one PSRAM buffer
-while the renderer updates the other, eliminating visible tearing and avoiding
-the memory-bandwidth spikes that can cause a DSI-bridge blue underrun frame.
+## LVGL graphics API
+
+The project uses **LVGL 9.4.0** from the ESP Component Registry with
+Espressif's `esp_lvgl_port` **2.9.0**. Both components support ESP-IDF 6.0.2
+and ESP32-P4. The port's LVGL task is pinned to core 1. The CAN receive task
+and gauge-data processing run on core 0; they publish value snapshots and do
+not call LVGL. The LVGL task owns image, label, and warning objects. Public
+text and warning APIs update small fixed-size models that the LVGL timer
+applies, so routine updates do not allocate memory.
+
+The little-endian RGB565 gauge image is rendered directly from flash by LVGL's
+RGB888 software renderer. The needle uses its existing 11 x 250 RGBA8888
+artwork and `(5, 200)` pivot. Its transparency is premultiplied once during
+renderer initialization; `lv_image_set_antialias()` enables filtered LVGL
+rotation.
+
+Numeric readouts use a persistent label and fixed text buffer. The selected
+LVGL font determines the text size; pass a custom `lv_font_t` to select
+another font. Example:
+
+```c
+static gauge_text_t *speed_readout;
+
+const gauge_text_config_t config = {
+    .x = 0,
+    .y = 120,
+    .width = 180,
+    .align = LV_ALIGN_CENTER,
+    .text_align = LV_TEXT_ALIGN_CENTER,
+    .color = lv_color_hex(0xFFFFFF),
+    .font = LV_FONT_DEFAULT,
+    .units = "MPH",
+    .visible = false,
+};
+ESP_ERROR_CHECK(gauge_text_create(&config, &speed_readout));
+ESP_ERROR_CHECK(gauge_text_set_float(speed_readout, 62.5f, 1));
+ESP_ERROR_CHECK(gauge_text_set_visible(speed_readout, true));
+
+/* Update this same label on later samples; it is not recreated. */
+ESP_ERROR_CHECK(gauge_text_set_integer(speed_readout, 63));
+```
+
+For warning indicators, provide an image descriptor in `image_src` for a
+custom icon, or leave it null for a circular indicator. Warning conditions
+and thresholds remain in application data processing, not the graphics
+layer:
+
+```c
+static gauge_warning_indicator_t *oil_warning;
+
+const gauge_warning_config_t warning_config = {
+    .x = -150,
+    .y = -170,
+    .align = LV_ALIGN_CENTER,
+    .size = 18,
+    .blink_interval_ms = 500,
+    .warning_color = lv_color_hex(0xFFC107),
+    .critical_color = lv_color_hex(0xF44336),
+    .visible = false,
+    .blink = true,
+};
+ESP_ERROR_CHECK(gauge_warning_indicator_create(&warning_config, &oil_warning));
+
+/* Call only when the separately evaluated warning state changes. */
+ESP_ERROR_CHECK(gauge_warning_indicator_set_state(oil_warning, GAUGE_WARNING_ACTIVE));
+ESP_ERROR_CHECK(gauge_warning_indicator_set_visible(oil_warning, true));
+/* Hide/clear it when the application reports recovery. */
+ESP_ERROR_CHECK(gauge_warning_indicator_set_state(oil_warning, GAUGE_WARNING_CLEAR));
+```
+
+The in-firmware demonstration readout and warning are behind
+`GAUGE_DEMO_WIDGETS_ENABLED`, which defaults to `0`; enabling it creates
+initially hidden objects and does not change the default gauge layout.
+
+Set `GAUGE_PERFORMANCE_DIAGNOSTICS` to `1` in `display_config.h` for
+five-second summaries of LVGL render time, refresh-cycle rate, free internal
+heap, free PSRAM, and the two-framebuffer memory footprint. Per-core CPU
+utilization is not currently reported: this build does not enable FreeRTOS
+SMP runtime statistics, and the counter settings would need separate
+validation before treating them as a reliable P4 measurement.
+
+Hardware validation is still required to confirm panel appearance, smooth
+filtered edges, and refresh stability on the target display.
 
 ## Troubleshooting
 
