@@ -527,7 +527,7 @@ I (....) backlight: Configured TPS92511DDA DIM PWM on GPIO8 at 20000 Hz
 The driver then starts MIPI DSI video output and initializes LVGL to display
 the supplied needle sprite over the embedded oil-pressure face at
 [`assets/oil_pressure_gauge.rgb565`](assets/oil_pressure_gauge.rgb565). The
-face is a centered 480 x 480, big-endian RGB565 image (460,800 bytes); its
+face is a centered 480 x 480, little-endian RGB565 image (460,800 bytes); its
 source PNG may be smaller than the display. The needle is an RGBA8888 sprite.
 Generate both embedded assets from their source PNGs with:
 
@@ -536,11 +536,11 @@ python tools\png_to_rgb565.py assets\oil_pressure_gauge.png --canvas-size 480 -o
 python tools\png_to_rgb565.py assets\needle.png --format rgba8888 -o assets\needle.rgba8888
 ```
 
-Rebuild and flash after replacing either source asset. LVGL reads the static
-RGB565 face directly from flash and redraws only invalidated regions. The
-display controller's two PSRAM-backed RGB888 framebuffers are used directly by
-LVGL in tear-avoiding direct mode; no second full-screen render buffer is
-allocated.
+Rebuild and flash after replacing either source asset. The little-endian
+RGB565 face is read directly from flash by LVGL, which redraws only invalidated
+regions. The display controller's two PSRAM-backed RGB888 framebuffers are
+used directly by LVGL in tear-avoiding direct mode; no full-screen image copy
+is allocated.
 
 ## Gauge animation
 
@@ -574,12 +574,11 @@ not call LVGL. The LVGL task owns image, label, and warning objects. Public
 text and warning APIs update small fixed-size models that the LVGL timer
 applies, so routine updates do not allocate memory.
 
-The static gauge image is kept in its original big-endian RGB565 form; the
-LVGL software renderer's swapped-RGB565 support is enabled at build time to
-avoid a second 460,800-byte image buffer. The needle uses its existing
-11 x 250 RGBA8888 artwork and `(5, 200)` pivot. Its transparency is premultiplied
-once during renderer initialization; `lv_image_set_antialias()` enables
-filtered LVGL rotation.
+The little-endian RGB565 gauge image is rendered directly from flash by LVGL's
+RGB888 software renderer. The needle uses its existing 11 x 250 RGBA8888
+artwork and `(5, 200)` pivot. Its transparency is premultiplied once during
+renderer initialization; `lv_image_set_antialias()` enables filtered LVGL
+rotation.
 
 Numeric readouts use a persistent label and fixed text buffer. The selected
 LVGL font determines the text size; pass a custom `lv_font_t` to select

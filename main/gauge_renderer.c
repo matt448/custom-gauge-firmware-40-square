@@ -102,6 +102,12 @@ static uint32_t s_render_count;
 static uint32_t s_refresh_count;
 #endif
 
+static void free_needle_pixels(void)
+{
+    heap_caps_free(s_needle_pixels);
+    s_needle_pixels = NULL;
+}
+
 static float clamp_value(float value)
 {
     if (value < GAUGE_RENDERER_MIN_PSI) {
@@ -413,7 +419,7 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
     s_background_image = (lv_image_dsc_t) {
         .header = {
             .magic = LV_IMAGE_HEADER_MAGIC,
-            .cf = LV_COLOR_FORMAT_RGB565_SWAPPED,
+            .cf = LV_COLOR_FORMAT_RGB565,
             .w = NEWHAVEN_DISPLAY_H_RES,
             .h = NEWHAVEN_DISPLAY_V_RES,
             .stride = NEWHAVEN_DISPLAY_H_RES * 2,
@@ -437,8 +443,7 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
     s_widget_lock = xSemaphoreCreateMutex();
     if (s_widget_lock == NULL) {
         ESP_LOGE(TAG, "Unable to create the graphics model mutex");
-        heap_caps_free(s_needle_pixels);
-        s_needle_pixels = NULL;
+        free_needle_pixels();
         return ESP_ERR_NO_MEM;
     }
 
@@ -448,8 +453,7 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
     const esp_err_t init_err = lvgl_port_init(&lvgl_config);
     if (init_err != ESP_OK) {
         ESP_LOGE(TAG, "LVGL port initialization failed: %s", esp_err_to_name(init_err));
-        heap_caps_free(s_needle_pixels);
-        s_needle_pixels = NULL;
+        free_needle_pixels();
         vSemaphoreDelete(s_widget_lock);
         s_widget_lock = NULL;
         return init_err;
@@ -475,8 +479,7 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
     if (s_lvgl_display == NULL) {
         ESP_LOGE(TAG, "Unable to connect LVGL to the MIPI DSI panel");
         (void)lvgl_port_deinit();
-        heap_caps_free(s_needle_pixels);
-        s_needle_pixels = NULL;
+        free_needle_pixels();
         vSemaphoreDelete(s_widget_lock);
         s_widget_lock = NULL;
         return ESP_FAIL;
@@ -498,8 +501,7 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
         (void)lvgl_port_remove_disp(s_lvgl_display);
         s_lvgl_display = NULL;
         (void)lvgl_port_deinit();
-        heap_caps_free(s_needle_pixels);
-        s_needle_pixels = NULL;
+        free_needle_pixels();
         vSemaphoreDelete(s_widget_lock);
         s_widget_lock = NULL;
         return ESP_ERR_TIMEOUT;
@@ -522,8 +524,7 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
         (void)lvgl_port_remove_disp(s_lvgl_display);
         s_lvgl_display = NULL;
         (void)lvgl_port_deinit();
-        heap_caps_free(s_needle_pixels);
-        s_needle_pixels = NULL;
+        free_needle_pixels();
         vSemaphoreDelete(s_widget_lock);
         s_widget_lock = NULL;
         return ESP_ERR_NO_MEM;

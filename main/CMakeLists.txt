@@ -44,6 +44,3 @@ if(EXISTS "${lvgl_port_dsi_source}")
         file(WRITE "${lvgl_port_dsi_source}" "${lvgl_port_dsi_source_text}")
     endif()
 endif()
-
-idf_component_get_property(lvgl_component_lib lvgl__lvgl COMPONENT_LIB)
-target_compile_definitions(${lvgl_component_lib} PUBLIC LV_DRAW_SW_SUPPORT_RGB565_SWAPPED=1)
