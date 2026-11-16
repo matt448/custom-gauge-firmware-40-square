@@ -92,6 +92,7 @@ static gauge_warning_indicator_t *s_warning_widgets;
 static int32_t s_last_needle_rotation = -1;
 static int64_t s_last_update_us;
 static bool s_scene_created;
+static bool s_first_frame_submitted;
 static bool s_initialized;
 #if GAUGE_PERFORMANCE_DIAGNOSTICS
 static int64_t s_render_start_us;
@@ -373,6 +374,17 @@ static void renderer_timer_callback(lv_timer_t *timer)
     }
 }
 
+static void frame_submitted_callback(lv_event_t *event)
+{
+    (void)event;
+    /* The direct-mode port submits only the last area and waits for DSI refresh. */
+    if (s_scene_created && lv_display_flush_is_last(s_lvgl_display)) {
+        portENTER_CRITICAL(&s_state_lock);
+        s_first_frame_submitted = true;
+        portEXIT_CRITICAL(&s_state_lock);
+    }
+}
+
 #if GAUGE_PERFORMANCE_DIAGNOSTICS
 static void performance_event_callback(lv_event_t *event)
 {
@@ -554,6 +566,8 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
         return ESP_ERR_TIMEOUT;
     }
     lv_display_set_rotation(s_lvgl_display, configured_display_rotation());
+    lv_display_add_event_cb(s_lvgl_display, frame_submitted_callback,
+                            LV_EVENT_FLUSH_FINISH, NULL);
 #if GAUGE_PERFORMANCE_DIAGNOSTICS
     lv_display_add_event_cb(s_lvgl_display, performance_event_callback,
                             LV_EVENT_RENDER_START, NULL);
@@ -582,6 +596,14 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
              NEWHAVEN_DISPLAY_H_RES, NEWHAVEN_DISPLAY_V_RES,
              GAUGE_RENDERER_DISPLAY_FORMAT_NAME);
     return ESP_OK;
+}
+
+bool gauge_renderer_first_frame_submitted(void)
+{
+    portENTER_CRITICAL(&s_state_lock);
+    const bool submitted = s_first_frame_submitted;
+    portEXIT_CRITICAL(&s_state_lock);
+    return submitted;
 }
 
 void gauge_renderer_set_value(float value)

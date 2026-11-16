@@ -27,7 +27,7 @@ extern const uint8_t needle_rgba8888_end[] asm("_binary_needle_rgba8888_end");
 #define GAUGE_PROCESS_RATE_HZ 30
 #define GAUGE_SWEEP_DURATION_MS 1500
 #define GAUGE_CYCLE_DURATION_MS (GAUGE_SWEEP_DURATION_MS * 2)
-#define GAUGE_ZERO_HOLD_MS 2000
+#define GAUGE_ZERO_HOLD_MS 750
 #define GAUGE_LOG_INTERVAL_MS 1000
 #define GAUGE_DEMO_WIDGETS_ENABLED 0
 #define GAUGE_OIL_PRESSURE_LOW_PSI 10.0f
@@ -109,14 +109,15 @@ static void init_oil_pressure_widgets(void)
                                                    &oil_pressure_warning));
 }
 
-static void update_oil_pressure_widgets(const oil_pressure_sample_t *sample, bool fresh)
+static void update_oil_pressure_widgets(const oil_pressure_sample_t *sample, bool fresh,
+                                         bool show_readout)
 {
     static int64_t last_readout_sample_us;
     static bool readout_is_stale = true;
     static oil_pressure_warning_state_t previous_warning;
     static bool warning_initialized;
 
-    if (fresh && sample->updated_us != last_readout_sample_us) {
+    if (show_readout && fresh && sample->updated_us != last_readout_sample_us) {
         ESP_ERROR_CHECK(gauge_text_set_integer(oil_pressure_readout,
                                                (int32_t)roundf(sample->pressure_psi)));
         last_readout_sample_us = sample->updated_us;
@@ -307,12 +308,18 @@ static void run_startup_color_tests(newhaven_display_t *display)
 
 void app_main(void)
 {
+    ESP_ERROR_CHECK(backlight_init());
     ESP_LOGI(TAG, "Starting Newhaven NHD-4.0-480480AF-MSXP bring-up");
 
     newhaven_display_t display;
     ESP_ERROR_CHECK(newhaven_display_init(&display));
-    ESP_ERROR_CHECK(backlight_init());
+#if NEWHAVEN_DISPLAY_HARDWARE_PATTERN_MS > 0 || NEWHAVEN_DISPLAY_STARTUP_COLOR_TEST_MS > 0
+    /* Keep opt-in visual diagnostics visible before the gauge is created. */
     ESP_ERROR_CHECK(backlight_set_brightness(NEWHAVEN_BACKLIGHT_DEFAULT_PERCENT));
+    bool startup_backlight_started = true;
+#else
+    bool startup_backlight_started = false;
+#endif
 
 #if NEWHAVEN_DISPLAY_HARDWARE_PATTERN_MS > 0
     ESP_LOGI(TAG, "Showing DSI HOST hardware color bars for %d ms (bypasses framebuffers)",
@@ -376,6 +383,11 @@ void app_main(void)
     bool waiting_logged = false;
 
     while (true) {
+        if (!startup_backlight_started && gauge_renderer_first_frame_submitted()) {
+            ESP_ERROR_CHECK(backlight_fade_to(NEWHAVEN_BACKLIGHT_DEFAULT_PERCENT,
+                                               NEWHAVEN_BACKLIGHT_STARTUP_FADE_MS));
+            startup_backlight_started = true;
+        }
         const uint32_t elapsed_time_ms =
             (uint32_t)((xTaskGetTickCount() - animation_start_time) * portTICK_PERIOD_MS);
         taskENTER_CRITICAL(&oil_pressure_lock);
@@ -384,8 +396,6 @@ void app_main(void)
         const bool fresh = sample.valid &&
             esp_timer_get_time() - sample.updated_us <
                 (int64_t)CAN_OIL_PRESSURE_TIMEOUT_MS * 1000;
-        update_oil_pressure_widgets(&sample, fresh);
-
         if (elapsed_time_ms < GAUGE_CYCLE_DURATION_MS) {
             const float cycle_fraction = (float)(elapsed_time_ms <= GAUGE_SWEEP_DURATION_MS ?
                                                      elapsed_time_ms :
@@ -424,6 +434,7 @@ void app_main(void)
             oil_pressure_stale = true;
             gauge_renderer_set_value(GAUGE_RENDERER_MIN_PSI);
         }
+        update_oil_pressure_widgets(&sample, fresh, startup_hold_completed);
         if (!sample.valid && startup_hold_completed && !waiting_logged) {
             ESP_LOGW(TAG, "Waiting for CAN oil pressure; needle at zero");
             waiting_logged = true;

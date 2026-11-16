@@ -69,6 +69,7 @@ esp_err_t gauge_renderer_init(esp_lcd_panel_handle_t dpi_panel,
                               size_t background_size,
                               const uint8_t *needle_rgba8888,
                               size_t needle_size);
+bool gauge_renderer_first_frame_submitted(void);
 void gauge_renderer_set_value(float value);
 void gauge_renderer_set_value_immediately(float value);
 esp_err_t gauge_renderer_set_smoothing_coefficient(float coefficient);
