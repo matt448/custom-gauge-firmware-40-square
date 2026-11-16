@@ -48,6 +48,7 @@
 #define NEWHAVEN_BACKLIGHT_PWM_GPIO            GPIO_NUM_8
 #define NEWHAVEN_BACKLIGHT_PWM_FREQUENCY_HZ    20000
 #define NEWHAVEN_BACKLIGHT_DEFAULT_PERCENT     100
+#define NEWHAVEN_BACKLIGHT_STARTUP_FADE_MS     3000
 
 /*
  * Keep one framebuffer under DSI scanout while the application renders into

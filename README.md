@@ -111,15 +111,16 @@ listen-only gauge alone are not a correctly acknowledged network.
 The receiver starts once after gauge-renderer initialization. A separate
 priority-1 task receives/processes CAN without waiting in the rendering loop.
 The full three-second startup sweep always completes, even if CAN traffic
-is already present, followed by a two-second hold at zero. Reception continues
+is already present, followed by a one-second hold at zero. Reception continues
 during the sweep and hold; afterward the
 smoothed needle follows the latest fresh CAN oil pressure. If no message
 arrives, the sweep finishes at zero. After two seconds without a valid oil-pressure
 message, the target returns to zero and a warning is logged once; reception
 of a fresh value logs recovery and resumes tracking. Zero on timeout is a
 fallback, not a confirmed pressure measurement. The production readout shows
-the latest fresh PSI value rounded to a whole number (or `--` before the first
-sample or when stale),
+the latest fresh PSI value rounded to a whole number only after the startup
+sweep and zero hold both finish (or `--` during the sweep and hold, before the
+first sample, or when stale),
 with `PSI` in a separate fixed-position label. A separate indicator blinks red
 immediately while waiting for the first sample and after two seconds without
 a subsequent valid sample; it glows amber below 10 PSI and solid red below
@@ -528,6 +529,7 @@ and the application sends Display On again after initialization.
 With the Newhaven initialization sequence:
 
 ```text
+I (....) backlight: Configured TPS92511DDA DIM PWM on GPIO8 at 20000 Hz
 I (....) main: Starting Newhaven NHD-4.0-480480AF-MSXP bring-up
 I (....) newhaven_display: Configuring and resetting RESETX
 I (....) newhaven_display: Creating two-lane MIPI DSI bus on data lanes 0 and 1
@@ -535,8 +537,28 @@ I (....) newhaven_display: Creating MIPI DSI command interface
 I (....) newhaven_display: Creating 480x480 MIPI DSI ST7701SN panel with 2 framebuffer(s)
 I (....) newhaven_display: Initializing ST7701SN controller
 I (....) newhaven_display: Sending Newhaven NHD-4.0-480480AF-MSXP ST7701SN initialization sequence
-I (....) backlight: Configured TPS92511DDA DIM PWM on GPIO8 at 20000 Hz
 ```
+
+The backlight is initialized at zero duty before display initialization. After
+the gauge scene's first final LVGL flush returns (including the DSI port's
+refresh-completion wait), the main loop starts a single nonblocking LEDC hardware
+fade to `NEWHAVEN_BACKLIGHT_DEFAULT_PERCENT` (100%). The linear PWM duty ramp
+uses `NEWHAVEN_BACKLIGHT_STARTUP_FADE_MS` (3000 ms); at 20 kHz and 10-bit duty,
+LEDC quantization gives approximately 2967 ms. The final duty is held without
+further updates, while CAN reception, rendering, and the startup needle sweep
+continue normally.
+
+`backlight_fade_to(percent, duration_ms)` keeps PWM details in the backlight
+module. A zero duration uses the immediate brightness setter. Both APIs reject
+competing updates during an active fade with `ESP_ERR_INVALID_STATE`; completion
+is tracked by an ISR-safe callback. Initialization and fade failures are logged
+and checked by the application. When optional hardware bars or startup color
+tests are enabled, startup instead uses the existing immediate brightness
+setting after display initialization so these diagnostic patterns remain visible.
+
+On hardware, verify there is no full-brightness flash after firmware takes
+control, a smooth approximately three-second fade, steady full brightness
+afterward, and uninterrupted CAN processing and gauge animation.
 
 The driver then starts MIPI DSI video output and initializes LVGL to display
 the supplied needle sprite over the embedded oil-pressure face at
@@ -561,7 +583,7 @@ LVGL port's software/PPA rotation path and may allocate a PSRAM scratch buffer.
 
 The application starts with a synthetic sweep from 0 to 150 PSI over
 approximately 1.5 seconds and returns to 0 PSI over the next 1.5 seconds.
-CAN oil pressure takes control only after the full sweep and a two-second
+CAN oil pressure takes control only after the full sweep and a one-second
 hold at zero complete, using
 the latest fresh reading received during or after startup. The renderer smooths subsequent
 needle movement with the existing 0.18-per-30-FPS smoothing coefficient,
